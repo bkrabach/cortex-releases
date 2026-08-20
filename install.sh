@@ -3,12 +3,17 @@
 # Cortex one-line installer.
 #
 #   curl -fsSL <this-script-url> | sh
-#   curl -fsSL <this-script-url> | sh -s -- --yes --use-shell-keys
+#   curl -fsSL <this-script-url> | sh -s -- --yes
 #
 # Anything after `--` is passed straight through to `cortex init`, so the same
 # flags that command takes work here too.
 #
 # What it does, in order:
+#   0. adopt the provider keys you already have exported. A piped `curl | sh`
+#      inherits your shell environment, so if the two keys Cortex needs are
+#      already exported it hands them to `cortex init` to SAVE (--use-shell-keys)
+#      -- and if a needed one is missing it stops HERE, before installing
+#      anything, and names the exact export(s) to run
 #   1. install uv (the Python packager Cortex ships through) if it is missing
 #   2. check that git can actually READ the private Cortex repos -- and if not,
 #      name the wall (unaccepted GitHub invitations) and the one-line fix
@@ -26,8 +31,137 @@ set -eu
 HUB_REPO_URL="https://github.com/bkrabach/cortex-hub"
 HUB_INSTALL_SOURCE="git+https://github.com/bkrabach/cortex-hub"
 
+# Set to 1 by ensure_provider_keys when it finds usable keys in the shell that
+# `cortex init` should be told to save.
+USE_SHELL_KEYS=0
+
 say()  { printf '%s\n' "$*"; }
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+# --------------------------------------------------------------------------
+# 0. Provider keys -- finish the job, or stop friendly BEFORE installing.
+#
+# Cortex needs two keys, for two different processes:
+#   GATEWAY (voice & chat)  -- OPENAI_API_KEY or XAI_API_KEY
+#   BRAIN   (what it thinks) -- ANTHROPIC_API_KEY, OPENAI_API_KEY or XAI_API_KEY
+# Every gateway key is also a brain key, so a single OpenAI/xAI export covers
+# both; only ANTHROPIC-alone leaves the gateway wanting.
+#
+# A piped `curl ... | sh` inherits these exports, but the gateway and brain run
+# as their OWN services and never see the installer's shell -- so when both keys
+# are present we hand `cortex init` --use-shell-keys, which copies them to the
+# files/env those services actually read. When a needed key is absent we stop
+# right here (nothing installed yet) and name the exact export to run.
+# --------------------------------------------------------------------------
+
+# True when the caller is already supplying keys some other way. Those paths
+# (--*-key, --*-key-file, --use-shell-keys) belong to `cortex init`, so the
+# shell gate below must defer to it rather than second-guess the command line.
+caller_supplies_keys() {
+    for a in "$@"; do
+        case "$a" in
+        --use-shell-keys | \
+            --openai-key | --openai-key-file | \
+            --xai-key | --xai-key-file | \
+            --anthropic-key | --anthropic-key-file | \
+            --brain-key | --brain-key-file)
+            return 0
+            ;;
+        --openai-key=* | --openai-key-file=* | \
+            --xai-key=* | --xai-key-file=* | \
+            --anthropic-key=* | --anthropic-key-file=* | \
+            --brain-key=* | --brain-key-file=*)
+            return 0
+            ;;
+        esac
+    done
+    return 1
+}
+
+ensure_provider_keys() {
+    if caller_supplies_keys "$@"; then
+        return
+    fi
+
+    # The provider keys actually exported, for the plain-language report.
+    found=""
+    for pair in \
+        "OPENAI_API_KEY=${OPENAI_API_KEY:-}" \
+        "XAI_API_KEY=${XAI_API_KEY:-}" \
+        "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}"; do
+        name=${pair%%=*}
+        value=${pair#*=}
+        if [ -n "$value" ]; then
+            if [ -n "$found" ]; then found="$found, $name"; else found="$name"; fi
+        fi
+    done
+
+    # Which gateway-capable key is exported? (mints voice/chat)
+    gateway_key=""
+    if [ -n "${OPENAI_API_KEY:-}" ]; then
+        gateway_key="OPENAI_API_KEY"
+    elif [ -n "${XAI_API_KEY:-}" ]; then
+        gateway_key="XAI_API_KEY"
+    fi
+
+    # Which brain-capable key is exported? (what actually thinks)
+    brain_key=""
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        brain_key="ANTHROPIC_API_KEY"
+    elif [ -n "${OPENAI_API_KEY:-}" ]; then
+        brain_key="OPENAI_API_KEY"
+    elif [ -n "${XAI_API_KEY:-}" ]; then
+        brain_key="XAI_API_KEY"
+    fi
+
+    if [ -n "$gateway_key" ] && [ -n "$brain_key" ]; then
+        USE_SHELL_KEYS=1
+        say "keys: found $found in your shell"
+        say "      Cortex will save them for its services (--use-shell-keys) -- the"
+        say "      gateway and brain run as their own services and cannot read your"
+        say "      shell, so the keys are copied to the files/env they DO read."
+        return
+    fi
+
+    # A needed key is missing. Stop BEFORE installing anything and name the fix.
+    {
+        printf '%s\n' "error: Cortex needs two provider keys and cannot find them in your shell."
+        printf '%s\n' ""
+        printf '%s\n' "  A piped 'curl ... | sh' inherits the keys you exported, and Cortex runs"
+        printf '%s\n' "  two things that each need one:"
+        printf '%s\n' "    - the GATEWAY (voice & chat)   needs  OPENAI_API_KEY   (or XAI_API_KEY)"
+        printf '%s\n' "    - the BRAIN   (what it thinks)  needs  ANTHROPIC_API_KEY (or OPENAI/XAI)"
+        printf '%s\n' ""
+        if [ -n "$found" ]; then
+            printf '%s\n' "  Found in your shell: $found"
+        else
+            printf '%s\n' "  Found in your shell: none"
+        fi
+        printf '%s\n' ""
+        printf '%s\n' "  Export the missing key(s), then run this same one-liner again:"
+        printf '%s\n' ""
+        if [ -z "$gateway_key" ]; then
+            printf '%s\n' "    export OPENAI_API_KEY=sk-...          # the gateway (xAI: XAI_API_KEY=xai-...)"
+        fi
+        if [ -z "$brain_key" ]; then
+            printf '%s\n' "    export ANTHROPIC_API_KEY=sk-ant-...   # the brain"
+        fi
+        printf '%s\n' ""
+        printf '%s\n' "  Nothing has been installed."
+    } >&2
+    exit 1
+}
+
+# True if --use-shell-keys is already among the caller's args -- so we never
+# hand `cortex init` the same flag twice.
+args_have_use_shell_keys() {
+    for a in "$@"; do
+        if [ "$a" = "--use-shell-keys" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
 
 # --------------------------------------------------------------------------
 # 1. uv -- installed only if it is missing. Installing a package manager behind
@@ -88,6 +222,12 @@ EOF
 # 3 + 4. install the CLI, then hand straight off to `cortex init`.
 # --------------------------------------------------------------------------
 main() {
+    # Capture what the USER passed, before we add anything of our own -- the
+    # "passing through" line reports the caller's args, never our injected flag.
+    user_arg_count=$#
+    user_args="$*"
+
+    ensure_provider_keys "$@"
     ensure_uv
     ensure_git_access
 
@@ -98,7 +238,16 @@ main() {
         "cortex-hub installed but 'cortex' is not on PATH -- uv usually puts it \
 in \$HOME/.local/bin; add that to PATH and run 'cortex init'"
 
-    say "cortex init: standing the stack up (passing through: $*)"
+    # Hand the shell keys to init to SAVE, unless the caller already asked.
+    if [ "$USE_SHELL_KEYS" = "1" ] && ! args_have_use_shell_keys "$@"; then
+        set -- --use-shell-keys "$@"
+    fi
+
+    if [ "$user_arg_count" -gt 0 ]; then
+        say "cortex init: standing the stack up (passing through: $user_args)"
+    else
+        say "cortex init: standing the stack up"
+    fi
     exec cortex init "$@"
 }
 
