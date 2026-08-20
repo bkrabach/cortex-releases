@@ -43,9 +43,13 @@ fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 #
 # Cortex needs two keys, for two different processes:
 #   GATEWAY (voice & chat)  -- OPENAI_API_KEY or XAI_API_KEY
-#   BRAIN   (what it thinks) -- ANTHROPIC_API_KEY, OPENAI_API_KEY or XAI_API_KEY
-# Every gateway key is also a brain key, so a single OpenAI/xAI export covers
-# both; only ANTHROPIC-alone leaves the gateway wanting.
+#   BRAIN   (what it thinks) -- ANTHROPIC_API_KEY ONLY
+# A bare OPENAI/XAI export satisfies the GATEWAY but NOT the brain: the
+# installed brain provider module is anthropic-only (cortex_hub/paths.py's
+# AGENT_PROVIDER_MODULE), so an openai/xai-only brain would answer "No
+# providers available" to every message forever -- nothing was ever
+# installed that could mount that key. A grok/xai-only brain is a SEPARATE,
+# unsupported path (FRESH-INSTALL.md); this gate does not pretend otherwise.
 #
 # A piped `curl ... | sh` inherits these exports, but the gateway and brain run
 # as their OWN services and never see the installer's shell -- so when both keys
@@ -104,14 +108,16 @@ ensure_provider_keys() {
         gateway_key="XAI_API_KEY"
     fi
 
-    # Which brain-capable key is exported? (what actually thinks)
+    # Which brain-capable key is exported? ANTHROPIC ONLY -- the installed
+    # brain provider module (cortex_hub/paths.py's AGENT_PROVIDER_MODULE) is
+    # anthropic-only. A bare OPENAI/XAI export mints gateway sessions fine
+    # but cannot make the BRAIN think: no module was ever installed that
+    # could mount it, so it would answer "No providers available" forever.
+    # A grok/xai-only brain is a separate, unsupported path
+    # (FRESH-INSTALL.md) -- this gate does not pretend otherwise.
     brain_key=""
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
         brain_key="ANTHROPIC_API_KEY"
-    elif [ -n "${OPENAI_API_KEY:-}" ]; then
-        brain_key="OPENAI_API_KEY"
-    elif [ -n "${XAI_API_KEY:-}" ]; then
-        brain_key="XAI_API_KEY"
     fi
 
     if [ -n "$gateway_key" ] && [ -n "$brain_key" ]; then
@@ -130,7 +136,8 @@ ensure_provider_keys() {
         printf '%s\n' "  A piped 'curl ... | sh' inherits the keys you exported, and Cortex runs"
         printf '%s\n' "  two things that each need one:"
         printf '%s\n' "    - the GATEWAY (voice & chat)   needs  OPENAI_API_KEY   (or XAI_API_KEY)"
-        printf '%s\n' "    - the BRAIN   (what it thinks)  needs  ANTHROPIC_API_KEY (or OPENAI/XAI)"
+        printf '%s\n' "    - the BRAIN   (what it thinks)  needs  ANTHROPIC_API_KEY (OPENAI/XAI do NOT"
+        printf '%s\n' "      satisfy it -- the installed brain provider module is anthropic-only)"
         printf '%s\n' ""
         if [ -n "$found" ]; then
             printf '%s\n' "  Found in your shell: $found"
